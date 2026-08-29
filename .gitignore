@@ -1,0 +1,25 @@
+# secrets
+.secrets.env
+*.secret
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+# captures (may contain personal/device data)
+tools/captures/
+*.har
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# internal docs (superpowers specs, RE notes)
+docs/
+
+# reverse-engineering / dev harnesses (local only)
+tools/

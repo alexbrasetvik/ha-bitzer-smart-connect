@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bitzer Smart Connect",
+        "description": "Sign in with your Bitzer Smart Connect account (the same email and password you use at bitzersmartconnect.com).",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "device": {
+        "title": "Select a device",
+        "description": "Pick the device to add. If the list is empty, enter the device ID — the number after /configurations/ in the web app URL.",
+        "data": {
+          "device_id": "Device",
+          "device_name": "Device name"
+        },
+        "data_description": {
+          "device_name": "Optional. A friendly name for this device in Home Assistant."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate",
+        "description": "Your Bitzer Smart Connect session has expired. Sign in again to continue.",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not connect to Bitzer Smart Connect."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "reauth_successful": "Reauthentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bitzer Smart Connect options",
+        "description": "Interval for the reconcile poll that runs alongside the live push connection.",
+        "data": {
+          "scan_interval": "Poll interval (seconds)",
+          "expose_all": "Expose all parameters (advanced)",
+          "temp_min": "Min temperature override",
+          "temp_max": "Max temperature override",
+          "temp_step": "Temperature step override",
+          "fan_min": "Min fan step override",
+          "fan_max": "Max fan step override"
+        },
+        "data_description": {
+          "scan_interval": "How often to reconcile in the background. The live connection still delivers updates immediately when it's up.",
+          "expose_all": "Also create entities for every configuration parameter the controller exposes (thresholds, schedules, program). They are created disabled — enable individually as needed. Off by default keeps the view to the live readouts and controls.",
+          "temp_min": "Leave blank to use the product profile or the controller's own range. Override if your unit's real limits differ.",
+          "temp_max": "Leave blank to use the product profile or the controller's own range.",
+          "temp_step": "Setpoint step, e.g. 0.5. Blank = auto.",
+          "fan_min": "Lowest selectable fan step (e.g. 1). Blank = auto.",
+          "fan_max": "Highest selectable fan step (e.g. 3). Blank = auto."
+        }
+      }
+    }
+  }
+}
