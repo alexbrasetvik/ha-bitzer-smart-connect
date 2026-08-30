@@ -139,14 +139,24 @@ class BitzerAuth:
                 "response_mode": "fragment",
             }
         )
-        # 1) authorize -> login page
-        status, headers, _ = await self._raw("GET", f"{LOGIN_BASE}/connect/authorize?{q}")
-        loc = headers.get("Location", "")
-        if status == 302 and "#access_token" in loc:  # already authenticated
-            return _token_from_fragment(loc)
-        if status != 302 or "Login" not in loc:
-            raise CannotConnect(f"unexpected authorize response {status}")
-        login_url = _abs(f"{LOGIN_BASE}/connect/authorize", loc)
+        # 1) authorize -> a token fragment when the SSO session is still valid (silent refresh),
+        #    else the login page. IdentityServer may bounce through /connect/authorize/callback first,
+        #    and the fragment leads with id_token, so follow redirects and match order-independently.
+        url = f"{LOGIN_BASE}/connect/authorize?{q}"
+        login_url = None
+        for _ in range(8):
+            status, headers, _ = await self._raw("GET", url)
+            loc = headers.get("Location", "")
+            if status == 302 and _has_token_fragment(loc):
+                return _token_from_fragment(loc)
+            if status != 302 or not loc:
+                raise CannotConnect(f"unexpected authorize response {status}")
+            if "/account/login" in loc.lower():
+                login_url = _abs(url, loc)
+                break
+            url = _abs(url, loc)
+        if login_url is None:
+            raise CannotConnect("authorize did not resolve to a token or login page")
 
         # 2) login form
         html = await self._text("GET", login_url)
@@ -259,6 +269,11 @@ def _form_inputs(form_html: str) -> dict[str, str]:
         if nm:
             out[nm.group(1)] = html_lib.unescape(vl.group(1)) if vl else ""
     return out
+
+
+def _has_token_fragment(loc: str) -> bool:
+    """True when a redirect Location carries an access token in its URL fragment."""
+    return "#" in loc and "access_token=" in loc.split("#", 1)[1]
 
 
 def _token_from_fragment(loc: str) -> Token:
