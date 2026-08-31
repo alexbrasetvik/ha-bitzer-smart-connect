@@ -27,7 +27,7 @@ from .const import (
 from .coordinator import BitzerConfigEntry, BitzerDeviceCoordinator
 from .entity import BitzerEntity
 from .entity_map import CURRENT_TEMP_KEYS
-from .profiles import Limit, param_limit
+from .profiles import Limit, fan_mode_labels, param_limit
 
 PARALLEL_UPDATES = 0
 
@@ -199,10 +199,19 @@ class BscClimate(BitzerEntity, ClimateEntity):
         hi = int(ov_hi) if ov_hi is not None else (int(lim.max) if lim and lim.max is not None else api_hi)
         return lo, hi
 
+    def _fan_entries(self) -> list[tuple[int, str]]:
+        """Ordered (ventilation value, label) pairs for the current range, profile labels preferred."""
+        lo, hi = self._vent_range()
+        product_id = self.coordinator.config.product_id if self.coordinator.config else None
+        labels = fan_mode_labels(product_id)
+        return [
+            (i, labels[i] if labels and i in labels else _fan_label(i))
+            for i in range(lo, hi + 1)
+        ]
+
     @property
     def fan_modes(self) -> list[str]:
-        lo, hi = self._vent_range()
-        return [_fan_label(i) for i in range(lo, hi + 1)]
+        return [label for _, label in self._fan_entries()]
 
     @property
     def fan_mode(self) -> str | None:
@@ -210,16 +219,23 @@ class BscClimate(BitzerEntity, ClimateEntity):
         if param is None:
             return None
         value = param.float_value()
-        return _fan_label(int(value)) if value is not None else None
+        if value is None:
+            return None
+        current = int(value)
+        return next(
+            (label for raw, label in self._fan_entries() if raw == current),
+            _fan_label(current),
+        )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         param = self._vent_param
         if param is None:
             return
-        value = 0 if fan_mode == FAN_OFF else _as_int(fan_mode)
-        if value is None:
-            raise ServiceValidationError(f"unknown fan mode {fan_mode}")
-        await self._async_write(param.id, str(value))
+        for raw, label in self._fan_entries():
+            if label == fan_mode:
+                await self._async_write(param.id, str(raw))
+                return
+        raise ServiceValidationError(f"unknown fan mode {fan_mode}")
 
     # -- writes -----------------------------------------------------------------
 
@@ -232,10 +248,3 @@ class BscClimate(BitzerEntity, ClimateEntity):
 
 def _fan_label(value: int) -> str:
     return FAN_OFF if value == 0 else str(value)
-
-
-def _as_int(value: str) -> int | None:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None

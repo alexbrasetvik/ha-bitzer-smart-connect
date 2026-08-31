@@ -8,13 +8,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import BitzerAuth, BitzerClient, BitzerHub, CannotConnect, InvalidAuth
 from .api.models import DeviceConfig, Parameter
-from .const import DOMAIN
+from .const import DEVICE_OFFLINE_GRACE, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,13 +57,14 @@ class BitzerDeviceCoordinator(DataUpdateCoordinator[dict[str, Parameter]]):
         self.device_online: bool = False
         self.localization: dict[str, str] = {}
         self._hub: BitzerHub | None = None
+        self._offline_timer: CALLBACK_TYPE | None = None
 
     # -- polling (reconcile) ----------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, Parameter]:
         try:
             config = await self.client.async_get_config(self.device_id)
-            self.device_online = await self.client.async_get_status(self.device_id)
+            online = await self.client.async_get_status(self.device_id)
         except InvalidAuth as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except CannotConnect as err:
@@ -70,7 +72,30 @@ class BitzerDeviceCoordinator(DataUpdateCoordinator[dict[str, Parameter]]):
         if not self.config and config.product_id:
             self.localization = await self.client.async_get_localization(config.product_id)
         self.config = config
+        self._apply_online_signal(online)
         return config.parameters
+
+    @callback
+    def _apply_online_signal(self, online: bool) -> None:
+        """Track device presence, debouncing offline so brief dropouts don't flap availability."""
+        if online:
+            if self._offline_timer is not None:
+                self._offline_timer()
+                self._offline_timer = None
+            if not self.device_online:
+                self.device_online = True
+                self.async_update_listeners()
+            return
+        if not self.device_online or self._offline_timer is not None:
+            return
+
+        @callback
+        def _commit_offline(_now) -> None:
+            self._offline_timer = None
+            self.device_online = False
+            self.async_update_listeners()
+
+        self._offline_timer = async_call_later(self.hass, DEVICE_OFFLINE_GRACE, _commit_offline)
 
     # -- realtime (hub) ---------------------------------------------------------
 
@@ -80,6 +105,9 @@ class BitzerDeviceCoordinator(DataUpdateCoordinator[dict[str, Parameter]]):
         self._hub.start()
 
     async def async_stop_hub(self) -> None:
+        if self._offline_timer is not None:
+            self._offline_timer()
+            self._offline_timer = None
         if self._hub is not None:
             await self._hub.stop()
             self._hub = None
@@ -98,8 +126,7 @@ class BitzerDeviceCoordinator(DataUpdateCoordinator[dict[str, Parameter]]):
         if target == "parametersUpdatedJSON":
             self._apply_parameter_deltas(args)
         elif target == "deviceStatusChanged" and args:
-            self.device_online = bool(args[0])
-            self.async_update_listeners()
+            self._apply_online_signal(bool(args[0]))
         elif target in ("deviceUpdated", "alarmsUpdated", "parametersUpdated"):
             # covered by parametersUpdatedJSON / the reconcile poll; nudge listeners for availability
             self.async_update_listeners()

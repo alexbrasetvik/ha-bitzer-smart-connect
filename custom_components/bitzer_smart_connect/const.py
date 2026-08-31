@@ -42,6 +42,7 @@ MIN_SCAN_INTERVAL = 30
 HUB_RECONNECT_MIN = 5  # seconds
 HUB_RECONNECT_MAX = 300  # seconds (cap for exponential backoff)
 HUB_RX_TIMEOUT = 45  # seconds without any frame (server pings ~16s) => connection is dead, reconnect
+DEVICE_OFFLINE_GRACE = 90  # seconds the device must stay offline before entities go unavailable
 POLL_FALLBACK_MIN = 5
 POLL_FALLBACK_MAX = 300
 WRITE_CONFIRM_TIMEOUT = 20  # seconds to await a hub echo after a write

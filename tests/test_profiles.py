@@ -1,6 +1,7 @@
 """Per-product profile overrides."""
 from custom_components.bitzer_smart_connect.profiles import (
     PRODUCT_PROFILES,
+    fan_mode_labels,
     param_limit,
     product_model,
 )
@@ -16,7 +17,12 @@ def test_ensy_profile_limits():
     assert (temp.min, temp.max, temp.step) == (10, 26, 0.5)
 
 
+def test_ensy_fan_mode_labels():
+    assert fan_mode_labels(ENSY) == {1: "low", 2: "medium", 3: "high"}
+
+
 def test_unknown_product_falls_back():
     assert product_model("does-not-exist") is None
     assert param_limit("does-not-exist", "Control.TempSet") is None
     assert param_limit(None, "Control.VentSet") is None
+    assert fan_mode_labels("does-not-exist") is None
