@@ -41,6 +41,7 @@ DEFAULT_SCAN_INTERVAL = 120  # seconds; gentle reconcile poll that runs alongsid
 MIN_SCAN_INTERVAL = 30
 HUB_RECONNECT_MIN = 5  # seconds
 HUB_RECONNECT_MAX = 300  # seconds (cap for exponential backoff)
+HUB_RX_TIMEOUT = 45  # seconds without any frame (server pings ~16s) => connection is dead, reconnect
 POLL_FALLBACK_MIN = 5
 POLL_FALLBACK_MAX = 300
 WRITE_CONFIRM_TIMEOUT = 20  # seconds to await a hub echo after a write

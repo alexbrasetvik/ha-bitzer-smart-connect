@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 
 import aiohttp
 
-from ..const import HUB_RECONNECT_MAX, HUB_RECONNECT_MIN, SIGNALR_HUB
+from ..const import HUB_RECONNECT_MAX, HUB_RECONNECT_MIN, HUB_RX_TIMEOUT, SIGNALR_HUB
 from .auth import BitzerAuth
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class BitzerHub:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._runner: asyncio.Task | None = None
         self._keepalive: asyncio.Task | None = None
+        self._invocation_id = 0
         self._closing = False
         self.connected = False
         self.on_connection_change: Callable[[bool], None] | None = None
@@ -92,13 +93,26 @@ class BitzerHub:
             await self._subscribe()
             self._set_connected(True)
             self._keepalive = asyncio.ensure_future(self._keepalive_loop(ws))
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._handle_text(msg.data)
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
-        if self._keepalive:
-            self._keepalive.cancel()
+            try:
+                while not self._closing:
+                    # The server pings ~every 16s; a longer silence means a half-open
+                    # socket (no close frame), so time out and let _run reconnect.
+                    try:
+                        msg = await asyncio.wait_for(ws.receive(), timeout=HUB_RX_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        _LOGGER.debug("hub: no frame for %ss, reconnecting", HUB_RX_TIMEOUT)
+                        break
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await self._handle_text(msg.data)
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.CLOSING,
+                        aiohttp.WSMsgType.ERROR,
+                    ):
+                        break
+            finally:
+                if self._keepalive:
+                    self._keepalive.cancel()
 
     async def _negotiate(self, token: str) -> str:
         async with self._auth.session.post(
@@ -120,15 +134,26 @@ class BitzerHub:
                 raise ConnectionError(f"handshake error: {obj['error']}")
 
     async def _subscribe(self) -> None:
+        # Mirror the official client's opening sequence (it calls both Subscribe casings).
         dev = self._device_id
+        await self._invoke("Subscribe", [f"{dev}_Updates"])
         await self._invoke("subscribe", [f"{dev}_Updates"])
         await self._invoke("DeviceActivated", [str(dev)])
         await self._invoke("SetActiveViewString", [dev, "Configuration"])
 
     async def _invoke(self, target: str, args: list) -> None:
         assert self._ws is not None
+        self._invocation_id += 1
         await self._ws.send_str(
-            json.dumps({"arguments": args, "target": target, "type": 1}) + RS
+            json.dumps(
+                {
+                    "arguments": args,
+                    "invocationId": str(self._invocation_id),
+                    "target": target,
+                    "type": 1,
+                }
+            )
+            + RS
         )
 
     async def _keepalive_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
