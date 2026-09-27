@@ -1,12 +1,14 @@
 """Headless OIDC login for Bitzer Smart Connect.
 
-Yields the SPA's bearer access token plus the www app's cookie session (silent authorization_code flow).
+Yields the mobile client's bearer access token plus the www app's cookie session, via a
+headless authorization-code + PKCE flow (the SPA implicit flow is rejected by the server).
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -24,6 +26,7 @@ from ..const import (
     OIDC_CLIENT_ID,
     OIDC_REDIRECT_URI,
     OIDC_SCOPE,
+    OIDC_TOKEN_ENDPOINT,
     WWW_BASE,
 )
 from .models import Token
@@ -34,6 +37,8 @@ _REDIRECT_CODES = (301, 302, 303, 307, 308)
 _TOKEN_RE = re.compile(
     r'name=["\']__RequestVerificationToken["\'][^>]*value=["\']([^"\']+)["\']'
 )
+# The scheme part of the (custom-scheme) OIDC redirect uri, e.g. "de.bitzer.balder:".
+_REDIRECT_SCHEME = OIDC_REDIRECT_URI.split(":", 1)[0] + ":"
 
 
 class BitzerAuthError(Exception):
@@ -72,16 +77,23 @@ class BitzerAuth:
     # -- public -----------------------------------------------------------------
 
     async def async_login(self) -> Token:
-        """Run the implicit flow and store a fresh access token."""
-        self._token = await self._implicit_login()
+        """Run the authorization-code + PKCE flow and store a fresh access token."""
+        self._token = await self._code_login()
         self._www_ready = False  # a fresh token means the www session must be re-established
         return self._token
 
     async def async_access_token(self) -> str:
-        """Return a valid Bearer token, re-logging in if needed."""
+        """Return a valid Bearer token, refreshing or re-logging in as needed."""
         now = datetime.now(timezone.utc)
-        if self._token is None or not self._token.is_valid(now):
-            await self.async_login()
+        if self._token is not None and self._token.is_valid(now):
+            return self._token.access_token
+        # Try a silent refresh_token grant before a full credentialed login.
+        if self._token is not None and self._token.refresh_token:
+            refreshed = await self._refresh()
+            if refreshed is not None:
+                self._token = refreshed
+                return self._token.access_token
+        await self.async_login()
         assert self._token is not None
         return self._token.access_token
 
@@ -124,41 +136,53 @@ class BitzerAuth:
     def invalidate_www_session(self) -> None:
         self._www_ready = False
 
-    # -- implicit login ---------------------------------------------------------
+    # -- authorization-code + PKCE login ----------------------------------------
 
-    async def _implicit_login(self) -> Token:
+    async def _code_login(self) -> Token:
+        verifier, challenge = _pkce_pair()
         state, nonce = secrets.token_urlsafe(16), secrets.token_urlsafe(16)
         q = urllib.parse.urlencode(
             {
                 "client_id": OIDC_CLIENT_ID,
                 "redirect_uri": OIDC_REDIRECT_URI,
-                "response_type": "id_token token",
+                "response_type": "code",
                 "scope": OIDC_SCOPE,
                 "state": state,
                 "nonce": nonce,
-                "response_mode": "fragment",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
             }
         )
-        # 1) authorize -> a token fragment when the SSO session is still valid (silent refresh),
-        #    else the login page. IdentityServer may bounce through /connect/authorize/callback first,
-        #    and the fragment leads with id_token, so follow redirects and match order-independently.
+        # 1) authorize -> the redirect uri carrying ?code=... when the SSO session is
+        #    still valid, else the login page. IdentityServer may bounce through
+        #    /connect/authorize/callback first, so follow http redirects along the way.
         url = f"{LOGIN_BASE}/connect/authorize?{q}"
         login_url = None
+        code = None
         for _ in range(8):
             status, headers, _ = await self._raw("GET", url)
             loc = headers.get("Location", "")
-            if status == 302 and _has_token_fragment(loc):
-                return _token_from_fragment(loc)
-            if status != 302 or not loc:
+            if status in _REDIRECT_CODES and _is_redirect_uri(loc):
+                code = _code_from_redirect(loc)  # silent SSO, no credentials needed
+                break
+            if status not in _REDIRECT_CODES or not loc:
                 raise CannotConnect(f"unexpected authorize response {status}")
             if "/account/login" in loc.lower():
                 login_url = _abs(url, loc)
                 break
             url = _abs(url, loc)
-        if login_url is None:
-            raise CannotConnect("authorize did not resolve to a token or login page")
 
-        # 2) login form
+        # 2) credentialed login when there was no live SSO session
+        if code is None:
+            if login_url is None:
+                raise CannotConnect("authorize did not resolve to a code or login page")
+            code = await self._form_login(login_url)
+
+        # 3) exchange the authorization code for tokens
+        return await self._exchange_code(code, verifier)
+
+    async def _form_login(self, login_url: str) -> str:
+        """Submit the username/password form and return the authorization code."""
         html = await self._text("GET", login_url)
         form = _scrape_login_form(html)
         m = _TOKEN_RE.search(html)
@@ -172,7 +196,6 @@ class BitzerAuth:
         form["ClientTimezoneOffsetMinutes"] = off_min
         form["ClientTimeZoneOffset"] = off_enc
 
-        # 3) submit credentials
         status, headers, body = await self._raw(
             "POST",
             login_url,
@@ -181,20 +204,71 @@ class BitzerAuth:
         )
         if status not in _REDIRECT_CODES:
             low = body.lower()
-            if "invalid" in low or ("password" in low and "error" in low):
+            if "invalid username or password" in low or "invalid" in low or (
+                "password" in low and "error" in low
+            ):
                 raise InvalidAuth("credentials rejected")
             raise CannotConnect(f"login POST returned {status}")
-        authf = _abs(login_url, headers.get("Location", ""))
 
-        # 4) authorize (authenticated) -> token fragment
-        status, headers, _ = await self._raw("GET", authf)
-        loc = headers.get("Location", "")
-        if status == 302 and "#" not in loc and loc:
-            status, headers, _ = await self._raw("GET", _abs(authf, loc))
+        # Follow the post-login redirect chain until the custom-scheme redirect uri
+        # (which carries ?code=...). The final hop is a non-http scheme, so inspect
+        # each Location before dereferencing it.
+        return await self._follow_to_code(login_url, headers.get("Location", ""))
+
+    async def _follow_to_code(self, base: str, loc: str) -> str:
+        for _ in range(10):
+            if _is_redirect_uri(loc):
+                return _code_from_redirect(loc)
+            if not loc:
+                raise CannotConnect("login did not reach the redirect uri")
+            nxt = _abs(base, loc)
+            status, headers, _ = await self._raw("GET", nxt)
+            base = nxt
             loc = headers.get("Location", "")
-        if "access_token" not in loc:
-            raise CannotConnect("no token in final redirect")
-        return _token_from_fragment(loc)
+            if status not in _REDIRECT_CODES:
+                raise CannotConnect(f"login did not reach a code ({status})")
+        raise CannotConnect("too many redirects chasing authorization code")
+
+    async def _exchange_code(self, code: str, verifier: str) -> Token:
+        status, _, body = await self._raw(
+            "POST",
+            OIDC_TOKEN_ENDPOINT,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": OIDC_REDIRECT_URI,
+                "client_id": OIDC_CLIENT_ID,
+                "code_verifier": verifier,
+            },
+            headers={"Accept": "application/json"},
+        )
+        if status != 200:
+            raise CannotConnect(f"token exchange failed ({status}): {body[:200]}")
+        return _token_from_json(body)
+
+    async def _refresh(self) -> Token | None:
+        """Attempt a refresh_token grant; return None on any failure (caller re-logs in)."""
+        if self._token is None or not self._token.refresh_token:
+            return None
+        try:
+            status, _, body = await self._raw(
+                "POST",
+                OIDC_TOKEN_ENDPOINT,
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": OIDC_CLIENT_ID,
+                    "refresh_token": self._token.refresh_token,
+                },
+                headers={"Accept": "application/json"},
+            )
+        except CannotConnect:
+            return None
+        if status != 200:
+            return None
+        try:
+            return _token_from_json(body)
+        except (KeyError, ValueError):
+            return None
 
     # -- www code flow ----------------------------------------------------------
 
@@ -271,17 +345,42 @@ def _form_inputs(form_html: str) -> dict[str, str]:
     return out
 
 
-def _has_token_fragment(loc: str) -> bool:
-    """True when a redirect Location carries an access token in its URL fragment."""
-    return "#" in loc and "access_token=" in loc.split("#", 1)[1]
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) for PKCE with the S256 method."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
-def _token_from_fragment(loc: str) -> Token:
-    frag = dict(urllib.parse.parse_qsl(loc.split("#", 1)[1]))
-    expires_in = int(frag.get("expires_in", "3600"))
+def _is_redirect_uri(loc: str) -> bool:
+    """True when a Location is the client's (custom-scheme) redirect uri carrying a code."""
+    return bool(loc) and loc.startswith(_REDIRECT_SCHEME) and "code=" in loc
+
+
+def _code_from_redirect(loc: str) -> str:
+    """Extract the authorization code from the redirect uri (query or fragment)."""
+    if "?" in loc:
+        part = loc.split("?", 1)[1]
+    elif "#" in loc:
+        part = loc.split("#", 1)[1]
+    else:
+        part = loc
+    params = dict(urllib.parse.parse_qsl(part))
+    code = params.get("code")
+    if not code:
+        raise CannotConnect("redirect uri carried no authorization code")
+    return code
+
+
+def _token_from_json(body: str) -> Token:
+    """Parse a /connect/token JSON response into a Token."""
+    d = json.loads(body)
+    expires_in = int(d.get("expires_in", 3600))
     return Token(
-        access_token=frag["access_token"],
-        id_token=frag.get("id_token", ""),
+        access_token=d["access_token"],
+        id_token=d.get("id_token", ""),
+        refresh_token=d.get("refresh_token", ""),
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in),
     )
 

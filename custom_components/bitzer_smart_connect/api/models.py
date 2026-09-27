@@ -13,6 +13,7 @@ class Token:
     access_token: str
     expires_at: datetime
     id_token: str = ""
+    refresh_token: str = ""
 
     def is_valid(self, now: datetime, margin_seconds: float = 300) -> bool:
         return (self.expires_at - now).total_seconds() > margin_seconds

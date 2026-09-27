@@ -12,10 +12,15 @@ API_BASE = "https://api.bitzersmartconnect.com/api"
 WWW_BASE = "https://www.bitzersmartconnect.com"
 SIGNALR_HUB = "https://api.bitzersmartconnect.com/signalr/deviceHub"
 
-# --- OIDC (IdentityServer) client used by the official SPA ---
-OIDC_CLIENT_ID = "BitzerIoC.SPA"
-OIDC_REDIRECT_URI = f"{WWW_BASE}/auth/callback/"
-OIDC_SCOPE = "openid profile email webapi_scope"
+# --- OIDC (IdentityServer) client ---
+# The SPA client (BitzerIoC.SPA, implicit flow "id_token token") is rejected by the
+# server, so we authenticate as the mobile app's client, which uses authorization-code
+# + PKCE. Its token carries webapi_scope and is accepted by both the api and www hosts.
+OIDC_CLIENT_ID = "Bitzer.Balder.Code"
+OIDC_REDIRECT_URI = "de.bitzer.balder:/oauth2redirect"
+OIDC_SCOPE = "webapi_scope openid offline_access profile email balder_scope"
+OIDC_TOKEN_ENDPOINT = f"{LOGIN_BASE}/connect/token"
+OIDC_AUTHORIZE_ENDPOINT = f"{LOGIN_BASE}/connect/authorize"
 
 # --- Config entry keys ---
 CONF_USERNAME = "username"
@@ -58,6 +63,8 @@ __all__ = [
     "OIDC_CLIENT_ID",
     "OIDC_REDIRECT_URI",
     "OIDC_SCOPE",
+    "OIDC_TOKEN_ENDPOINT",
+    "OIDC_AUTHORIZE_ENDPOINT",
     "CONF_USERNAME",
     "CONF_PASSWORD",
     "CONF_BOUNDARY_ID",
