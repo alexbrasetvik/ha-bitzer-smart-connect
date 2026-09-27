@@ -36,12 +36,29 @@ class BitzerClient:
         return [Boundary.from_json(b) for b in (data or [])]
 
     async def async_get_user_devices(self) -> list[Device]:
-        """List the account's devices via UserDevice/GetUserDevicesWithClaimTypes/<userId>.
+        """List the account's devices, with names.
 
-        That payload carries device ids but not names (``device`` is null), so names are filled in
-        best-effort from each device's config snapshot; callers may still allow a manual device id.
+        Uses ``Device/GetUserDevices`` (the mobile app's endpoint), which returns full device
+        objects — id, name, serial, product, online. Falls back to
+        ``UserDevice/GetUserDevicesWithClaimTypes/<userId>`` (ids only) if that is unavailable.
+        Callers may still allow a manually entered device id when nothing is listed.
         """
         await self._auth.async_access_token()
+        by_id: dict[int, Device] = {}
+        try:
+            data = await self._get_json(f"{API_BASE}/Device/GetUserDevices")
+        except CannotConnect:
+            data = None
+        for entry in data or []:
+            if not isinstance(entry, dict):
+                continue
+            dev = Device.from_json(entry)
+            if dev.id is not None and dev.id not in by_id:
+                by_id[dev.id] = dev
+        if by_id:
+            return list(by_id.values())
+
+        # Fallback: claim-types endpoint carries ids but not names.
         uid = self._auth.user_id
         if not uid:
             return []
@@ -51,7 +68,6 @@ class BitzerClient:
             )
         except CannotConnect:
             return []
-        by_id: dict[int, Device] = {}
         for entry in data or []:
             did = entry.get("deviceId") if isinstance(entry, dict) else None
             if did is None or did in by_id:
