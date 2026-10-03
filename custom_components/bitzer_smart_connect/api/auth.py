@@ -279,12 +279,23 @@ class BitzerAuth:
 
     async def _establish_www_session(self) -> None:
         cur = f"{WWW_BASE}/Configurations?deviceId=0"
+        logged_in = False
         for _ in range(12):
             status, headers, body = await self._raw("GET", cur)
             loc = headers.get("Location", "")
             if status in _REDIRECT_CODES and loc:
                 cur = _abs(cur, loc)
                 continue
+            if status == 200 and _is_login_page(cur) and not logged_in:
+                # The IdP's SSO cookie has lapsed. Refresh-token grants keep the bearer
+                # token alive without renewing it, so log in again with credentials.
+                _LOGGER.debug("IdP session lapsed; logging in again for the www session")
+                loc = await self._submit_login(cur, body)
+                logged_in = True
+                if loc:
+                    cur = _abs(cur, loc)
+                    continue
+                return
             if status == 200:
                 fm = re.search(
                     r'<form\b[^>]*action=["\']([^"\']+)["\'][^>]*>(.*?)</form>',
@@ -331,6 +342,11 @@ class BitzerAuth:
 
 def _abs(current: str, loc: str) -> str:
     return loc if loc.startswith("http") else urllib.parse.urljoin(current, loc)
+
+
+def _is_login_page(url: str) -> bool:
+    """True when ``url`` is the IdP's username/password login page."""
+    return url.startswith(LOGIN_BASE) and "/account/login" in url.lower()
 
 
 def _scrape_login_form(html: str) -> dict[str, str]:
