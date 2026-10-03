@@ -184,6 +184,15 @@ class BitzerAuth:
     async def _form_login(self, login_url: str) -> str:
         """Submit the username/password form and return the authorization code."""
         html = await self._text("GET", login_url)
+        loc = await self._submit_login(login_url, html)
+
+        # Follow the post-login redirect chain until the custom-scheme redirect uri
+        # (which carries ?code=...). The final hop is a non-http scheme, so inspect
+        # each Location before dereferencing it.
+        return await self._follow_to_code(login_url, loc)
+
+    async def _submit_login(self, login_url: str, html: str) -> str:
+        """POST credentials to the login page ``html`` and return the redirect Location."""
         form = _scrape_login_form(html)
         m = _TOKEN_RE.search(html)
         if not m:
@@ -209,11 +218,7 @@ class BitzerAuth:
             ):
                 raise InvalidAuth("credentials rejected")
             raise CannotConnect(f"login POST returned {status}")
-
-        # Follow the post-login redirect chain until the custom-scheme redirect uri
-        # (which carries ?code=...). The final hop is a non-http scheme, so inspect
-        # each Location before dereferencing it.
-        return await self._follow_to_code(login_url, headers.get("Location", ""))
+        return headers.get("Location", "")
 
     async def _follow_to_code(self, base: str, loc: str) -> str:
         for _ in range(10):
